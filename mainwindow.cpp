@@ -89,10 +89,8 @@ void MainWindow::checkForFiles()
         return;
     }
 
-    // Разбиваем строку масок по точке с запятой
     QStringList masks = maskText.split(";", Qt::SkipEmptyParts);
 
-    // Удаляем возможные пробелы вокруг масок
     for (QString& mask : masks) {
         mask = mask.trimmed();
     }
