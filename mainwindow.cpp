@@ -15,17 +15,27 @@ MainWindow::MainWindow(QWidget *parent)
     , ui(new Ui::MainWindow)
     , isRunning(false)
     , isProcessing(false)
+
 {
     ui->setupUi(this);
 
     timer = new QTimer(this);
-    connect(timer, &QTimer::timeout, this, &MainWindow::checkForFiles);
+    connect(timer, &QTimer::timeout, this, [this]() {
+        if (isRunning && !isProcessing) {
+            checkForFiles();
+        }
+    });
+
 
     futureWatcher = new QFutureWatcher<void>(this);
     connect(futureWatcher, &QFutureWatcher<void>::finished, this, [this]() {
         ui->runButton->setEnabled(true);
-        if (!isRunning) {
+
+        if (!futureWatcher->isCanceled()) {
             ui->progressBar->setValue(100);
+            if (ui->timerCheckBox->currentIndex() == 1) {
+                showMessage("Processing completed");
+            }
         }
     });
 
@@ -46,9 +56,19 @@ MainWindow::~MainWindow()
 
 void MainWindow::on_browseButton_clicked()
 {
-    QString dir = QFileDialog::getExistingDirectory(this, "Select Input Directory", QDir::currentPath());
+    QString dir = QFileDialog::getExistingDirectory(this, "Select Input Directory",
+                                                    QDir::currentPath());
     if (!dir.isEmpty()) {
         ui->lineEdit->setText(dir);
+    }
+}
+
+void MainWindow::on_saveButton_clicked()
+{
+    QString dir = QFileDialog::getExistingDirectory(this, "Select Directory to Save Files",
+                                                    QDir::currentPath());
+    if (!dir.isEmpty()) {
+        ui->pathLine->setText(dir);
     }
 }
 
@@ -58,22 +78,62 @@ void MainWindow::on_runButton_clicked()
         return;
     }
 
+    if (futureWatcher->isRunning()) {
+        futureWatcher->cancel();
+        futureWatcher->waitForFinished();
+    }
+
+    ui->progressBar->setValue(0);
+    ui->runButton->setEnabled(false);
+
+    isRunning = true;
+    isProcessing = false;
+
     if (ui->timerCheckBox->currentIndex() == 1) {
-        isRunning = false;
+        if (timer->isActive()) {
+            timer->stop();
+        }
         checkForFiles();
     } else {
-        isRunning = true;
+
         int interval = ui->spinBox->value() * 1000;
         timer->start(interval);
-        ui->runButton->setEnabled(false);
+    }
+    showMessage("Processing is running");
+}
+
+void MainWindow::on_stopButton_clicked()
+{
+    if (isRunning) {
+
+        int currentProgress = ui->progressBar->value();
+
+        if (timer->isActive()) {
+            timer->stop();
+        }
+
+        isRunning = false;
+
+        if (futureWatcher->isRunning()) {
+            futureWatcher->cancel();
+            isProcessing = false;
+        }
+
+        ui->runButton->setEnabled(true);
+        ui->stopButton->setEnabled(true);
+        ui->progressBar->setValue(currentProgress);
+        showMessage("Processing stopped by user");
     }
 }
 
-
 void MainWindow::checkForFiles()
 {
+    if (!isRunning) {
+        ui->runButton->setEnabled(true);
+        return;
+    }
+
     if (isProcessing) {
-        qDebug() << "Processing already in progress, skipping check";
         return;
     }
 
@@ -89,10 +149,8 @@ void MainWindow::checkForFiles()
         return;
     }
 
-    // Разбиваем строку масок по точке с запятой
     QStringList masks = maskText.split(";", Qt::SkipEmptyParts);
 
-    // Удаляем возможные пробелы вокруг масок
     for (QString& mask : masks) {
         mask = mask.trimmed();
     }
@@ -116,6 +174,7 @@ void MainWindow::checkForFiles()
     });
     futureWatcher->setFuture(future);
 }
+
 void MainWindow::processFiles(const QFileInfoList& files)
 {
     QByteArray key = QByteArray::fromHex(ui->keyLine->text().toUtf8());
@@ -155,11 +214,10 @@ void MainWindow::processFiles(const QFileInfoList& files)
         qint64 fileSize = file.size();
         const qint64 bufferSize = 1024 * 1024;
 
-        while (!file.atEnd()) {
+        while (!file.atEnd() && isRunning) {
+
             QByteArray chunk = file.read(bufferSize);
-            if (chunk.isEmpty()) {
-                break;
-            }
+            if (chunk.isEmpty()) break;
 
             for (int j = 0; j < chunk.size(); ++j) {
                 chunk[j] ^= key[j % 8];
@@ -168,11 +226,19 @@ void MainWindow::processFiles(const QFileInfoList& files)
             data.append(chunk);
             totalBytes += chunk.size();
 
-            int progress = ((i * 100) + (totalBytes * 100 / fileSize)) / files.size();
-            QMetaObject::invokeMethod(ui->progressBar, "setValue",
-                                      Qt::QueuedConnection,
-                                      Q_ARG(int, progress));
+            int progress = qMin(99, ((i * 100) + (totalBytes * 100 / fileSize)) / files.size());
+            QMetaObject::invokeMethod(this, [this, progress]() {
+                    if (isRunning) {
+                        ui->progressBar->setValue(progress);
+                    }
+                }, Qt::QueuedConnection);
         }
+
+        if (!isRunning) {
+            file.close();
+            break;
+        }
+
         file.close();
 
         QString outName = fi.fileName();
@@ -207,10 +273,18 @@ void MainWindow::processFiles(const QFileInfoList& files)
             }
         }
 
-        int progress = ((i + 1) * 100) / files.size();
-        QMetaObject::invokeMethod(ui->progressBar, "setValue",
-                                  Qt::QueuedConnection,
-                                  Q_ARG(int, progress));
+        if (!isRunning && ui->timerCheckBox->currentIndex() == 0) {
+            break;
+        }
+
+
+        if (isRunning) {
+            int progress = ((i * 100) + (totalBytes * 100 / fileSize)) / files.size();
+            QMetaObject::invokeMethod(ui->progressBar, "setValue",
+                                      Qt::QueuedConnection,
+                                      Q_ARG(int, progress));
+        }
+
     }
 
     isProcessing = false;
@@ -254,15 +328,6 @@ QByteArray MainWindow::parseXorKey(const QString &keyText)
     QString cleanText = keyText.trimmed();
     if (cleanText.length() != 16) return QByteArray();
     return QByteArray::fromHex(cleanText.toLatin1());
-}
-
-void MainWindow::on_saveButton_clicked()
-{
-    QString dir = QFileDialog::getExistingDirectory(this, "Select Directory to Save Files",
-                                                    QDir::currentPath());
-    if (!dir.isEmpty()) {
-        ui->pathLine->setText(dir);
-    }
 }
 
 void MainWindow::saveSettings()

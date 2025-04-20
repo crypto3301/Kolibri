@@ -28,6 +28,7 @@ private slots:
     void on_runButton_clicked();
     void on_saveButton_clicked();
     void checkForFiles();
+    void on_stopButton_clicked();
 
 private:
     Ui::MainWindow *ui;
@@ -36,7 +37,11 @@ private:
     QByteArray xorKey;
     bool isProcessing;
     QFuture<void> future;
+    std::atomic<int> processedFilesCount;
+    int totalFilesToProcess;
+    QMutex progressMutex;
 
+    void processSingleFile(const QFileInfo& fileInfo);
     void showMessage(const QString& message);
     QFutureWatcher<void> *futureWatcher;
     bool validateSettings();
